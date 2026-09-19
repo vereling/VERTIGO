@@ -1,0 +1,16 @@
+node_modules/
+.vercel/
+.tanstack/
+.grok/
+screenshots/
+artifacts/
+.project_id
+.node_modules.lock
+dist/
+.DS_Store
+.env
+.env.*
+*.local
+.nitro/
+AGENTS.md
+AGENTS.project.md
