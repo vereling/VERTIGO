@@ -1,16 +1,12 @@
 import * as THREE from "three";
 import type { ControlsProbe, HudState } from "./types";
-import { extractPitch, orthonormalFrame, rotationBetween } from "./orient";
+import { extractPitch, orthonormalFrame, rotationBetween, quatFromFps, fpsForward, adoptWorldLook } from "./orient";
+import { FACE, FILLET, HALF, sampleSurface } from "./surface";
 
-const ROOM = 24;
-const HALF = ROOM / 2;
 const EYE = 1.65;
-const RADIUS = 0.38;
 const WALK = 9.2;
 const JUMP = 8.2;
 const GRAV_ACCEL = 24;
-const BEVEL = 2.35;
-const RAMP_LEN = BEVEL * Math.SQRT2;
 
 const OUTS = [
   new THREE.Vector3(1, 0, 0),
@@ -66,23 +62,23 @@ export function mountGunWraith(
 
   const roomGroup = new THREE.Group();
   scene.add(roomGroup);
-  const faceSpan = ROOM - 2 * BEVEL;
-  const bevelMat = new THREE.MeshStandardMaterial({
+  const faceSpan = 2 * FACE;
+  const coveMat = new THREE.MeshStandardMaterial({
     color: 0x1e2a30,
-    roughness: 0.72,
-    metalness: 0.18,
+    roughness: 0.62,
+    metalness: 0.22,
     side: THREE.FrontSide,
-  });
-  const bevelEdgeMat = new THREE.LineBasicMaterial({
-    color: 0x7ec8c4,
-    transparent: true,
-    opacity: 0.55,
   });
   const cornerMat = new THREE.MeshStandardMaterial({
     color: 0x2a1816,
-    roughness: 0.7,
-    metalness: 0.12,
+    roughness: 0.64,
+    metalness: 0.14,
     side: THREE.FrontSide,
+  });
+  const coveLineMat = new THREE.LineBasicMaterial({
+    color: 0x7ec8c4,
+    transparent: true,
+    opacity: 0.4,
   });
 
   for (const f of FACES) {
@@ -121,48 +117,110 @@ export function mountGunWraith(
   }
 
   const eAx = new THREE.Vector3();
-  const stripDir = new THREE.Vector3();
-  const inward45 = new THREE.Vector3();
-  const bevelBasis = new THREE.Matrix4();
+  const aHat = new THREE.Vector3();
+  const bHat = new THREE.Vector3();
+  const off = new THREE.Vector3();
+  const axisP = new THREE.Vector3();
+  const ARC = 20;
+  const LEN = 12;
+
+  function addCove(a: THREE.Vector3, b: THREE.Vector3) {
+    aHat.copy(a);
+    bHat.copy(b);
+    eAx.crossVectors(a, b).normalize();
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const indices: number[] = [];
+    for (let i = 0; i <= LEN; i++) {
+      const u = -FACE + (2 * FACE * i) / LEN;
+      for (let j = 0; j <= ARC; j++) {
+        const t = j / ARC;
+        const c = Math.cos((t * Math.PI) / 2);
+        const s = Math.sin((t * Math.PI) / 2);
+        off.copy(aHat).multiplyScalar(c).addScaledVector(bHat, s).multiplyScalar(FILLET);
+        axisP.copy(aHat).multiplyScalar(FACE).addScaledVector(bHat, FACE);
+        axisP.addScaledVector(eAx, u);
+        positions.push(axisP.x + off.x, axisP.y + off.y, axisP.z + off.z);
+        const inv = FILLET > 0 ? -1 / FILLET : 0;
+        normals.push(off.x * inv, off.y * inv, off.z * inv);
+      }
+    }
+    const cols = ARC + 1;
+    for (let i = 0; i < LEN; i++) {
+      for (let j = 0; j < ARC; j++) {
+        const i0 = i * cols + j;
+        const i1 = i0 + 1;
+        const i2 = i0 + cols;
+        const i3 = i2 + 1;
+        indices.push(i0, i2, i1, i1, i2, i3);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+    geo.setIndex(indices);
+    roomGroup.add(new THREE.Mesh(geo, coveMat));
+    const mid: number[] = [];
+    for (let i = 0; i <= LEN; i++) {
+      const u = -FACE + (2 * FACE * i) / LEN;
+      const t = 0.5;
+      const c = Math.cos((t * Math.PI) / 2);
+      const s = Math.sin((t * Math.PI) / 2);
+      off.copy(aHat).multiplyScalar(c).addScaledVector(bHat, s).multiplyScalar(FILLET);
+      axisP.copy(aHat).multiplyScalar(FACE).addScaledVector(bHat, FACE).addScaledVector(eAx, u);
+      mid.push(axisP.x + off.x, axisP.y + off.y, axisP.z + off.z);
+    }
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(mid, 3));
+    roomGroup.add(new THREE.Line(lineGeo, coveLineMat));
+  }
+
   for (let i = 0; i < OUTS.length; i++) {
     for (let j = i + 1; j < OUTS.length; j++) {
       const a = OUTS[i];
       const b = OUTS[j];
       if (Math.abs(a.dot(b)) > 0.5) continue;
-      eAx.crossVectors(a, b).normalize();
-      inward45.copy(a).add(b).multiplyScalar(-1).normalize();
-      stripDir.crossVectors(inward45, eAx).normalize();
-      bevelBasis.makeBasis(eAx, stripDir, inward45);
-      const strip = new THREE.Mesh(
-        new THREE.PlaneGeometry(faceSpan, BEVEL * Math.SQRT2),
-        bevelMat,
-      );
-      strip.quaternion.setFromRotationMatrix(bevelBasis);
-      strip.position.copy(a).add(b).multiplyScalar(HALF);
-      strip.position.addScaledVector(inward45, BEVEL / Math.SQRT2);
-      roomGroup.add(strip);
-      const stripEdge = new THREE.LineSegments(new THREE.EdgesGeometry(strip.geometry), bevelEdgeMat);
-      stripEdge.quaternion.copy(strip.quaternion);
-      stripEdge.position.copy(strip.position);
-      roomGroup.add(stripEdge);
+      addCove(a, b);
     }
   }
 
-  const cv0 = new THREE.Vector3();
-  const cv1 = new THREE.Vector3();
-  const cv2 = new THREE.Vector3();
+  const CORNER_SEG = 10;
   for (const sx of [-1, 1]) {
     for (const sy of [-1, 1]) {
       for (const sz of [-1, 1]) {
-        cv0.set(sx * (HALF - BEVEL), sy * HALF, sz * HALF);
-        cv1.set(sx * HALF, sy * (HALF - BEVEL), sz * HALF);
-        cv2.set(sx * HALF, sy * HALF, sz * (HALF - BEVEL));
-        const inward = new THREE.Vector3(-sx, -sy, -sz);
-        const n = new THREE.Vector3().subVectors(cv1, cv0).cross(new THREE.Vector3().subVectors(cv2, cv0));
+        const positions: number[] = [];
+        const normals: number[] = [];
+        const indices: number[] = [];
+        const cx = sx * FACE;
+        const cy = sy * FACE;
+        const cz = sz * FACE;
+        for (let iv = 0; iv <= CORNER_SEG; iv++) {
+          const v = (iv / CORNER_SEG) * (Math.PI / 2);
+          const sv = Math.sin(v);
+          const cv = Math.cos(v);
+          for (let iu = 0; iu <= CORNER_SEG; iu++) {
+            const u = (iu / CORNER_SEG) * (Math.PI / 2);
+            const dx = sx * sv * Math.cos(u);
+            const dy = sy * cv;
+            const dz = sz * sv * Math.sin(u);
+            positions.push(cx + dx * FILLET, cy + dy * FILLET, cz + dz * FILLET);
+            normals.push(-dx, -dy, -dz);
+          }
+        }
+        const cols = CORNER_SEG + 1;
+        for (let iv = 0; iv < CORNER_SEG; iv++) {
+          for (let iu = 0; iu < CORNER_SEG; iu++) {
+            const i0 = iv * cols + iu;
+            const i1 = i0 + 1;
+            const i2 = i0 + cols;
+            const i3 = i2 + 1;
+            indices.push(i0, i2, i1, i1, i2, i3);
+          }
+        }
         const geo = new THREE.BufferGeometry();
-        if (n.dot(inward) < 0) geo.setFromPoints([cv0.clone(), cv2.clone(), cv1.clone()]);
-        else geo.setFromPoints([cv0.clone(), cv1.clone(), cv2.clone()]);
-        geo.computeVertexNormals();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+        geo.setIndex(indices);
         roomGroup.add(new THREE.Mesh(geo, cornerMat));
       }
     }
@@ -186,30 +244,19 @@ export function mountGunWraith(
   scene.add(ring);
 
   const up = new THREE.Vector3(0, 1, 0);
-  const targetUp = new THREE.Vector3(0, 1, 0);
-  const fromUp = new THREE.Vector3(0, 1, 0);
-  const fromLookF = new THREE.Vector3();
-  const fromLookR = new THREE.Vector3();
-  const fromLookFull = new THREE.Vector3();
-  const slideFromOut = new THREE.Vector3();
-  const slideToOut = new THREE.Vector3();
-  const slideEdge = new THREE.Vector3();
-  let slideCoord = 0;
-  let slideU = 0;
-  let slideLatVel = 0;
-  let slideLock = 0;
+  const surfP = new THREE.Vector3();
+  const surfN = new THREE.Vector3();
   let captured = false;
   let skipLook = 0;
-  const qId = new THREE.Quaternion();
-  const qFull = new THREE.Quaternion();
   const qNow = new THREE.Quaternion();
-  let reorientT = 1;
+  const qCam = new THREE.Quaternion();
   const pos = new THREE.Vector3(0, -HALF + EYE, 0);
   let pitch = 0;
   let upSpeed = 0;
   let grounded = true;
   let playing = false;
   let lastHud = "";
+  let zone: "face" | "edge" | "corner" = "face";
 
   const held = new Set<string>();
   const injected = new Set<string>();
@@ -221,17 +268,13 @@ export function mountGunWraith(
   const lookR = new THREE.Vector3();
   const wish = new THREE.Vector3();
   const tmp = new THREE.Vector3();
-  const tmp2 = new THREE.Vector3();
   const lookFull = new THREE.Vector3();
   const camRight = new THREE.Vector3();
   const camFwd = new THREE.Vector3();
   const camMat = new THREE.Matrix4();
-  const aimPoint = new THREE.Vector3();
-  let holdAim = false;
   const prevCamQ = new THREE.Quaternion();
   let havePrevCam = false;
   let maxQuatStep = 0;
-  const reorientLog: { s: number; ang: number; pitch: number; udot: number }[] = [];
   let planarSpeed = 0;
   let frameSpeed = 0;
   const prevPos = new THREE.Vector3(0, -HALF + EYE, 0);
@@ -244,40 +287,11 @@ export function mountGunWraith(
   }
 
   function lookDirTo(out: THREE.Vector3) {
-    out.copy(lookF).multiplyScalar(Math.cos(pitch)).addScaledVector(up, Math.sin(pitch));
-    if (out.lengthSq() < 1e-8) out.copy(lookF);
-    else out.normalize();
-    return out;
+    return fpsForward(lookF, up, pitch, out);
   }
 
-  function hitInterior(origin: THREE.Vector3, dir: THREE.Vector3, out: THREE.Vector3) {
-    const lim = HALF - 0.02;
-    let tHit = 64;
-    for (let i = 0; i < 3; i++) {
-      const d = dir.getComponent(i);
-      const o = origin.getComponent(i);
-      let t = -1;
-      if (d > 1e-6) t = (lim - o) / d;
-      else if (d < -1e-6) t = (-lim - o) / d;
-      if (t > 0.15 && t < tHit) tHit = t;
-    }
-    out.copy(origin).addScaledVector(dir, tHit);
-    return out;
-  }
-
-  function adoptAimAsFps() {
-    camFwd.subVectors(aimPoint, pos);
-    if (camFwd.lengthSq() < 1e-8) lookDirTo(camFwd);
-    else camFwd.normalize();
-    pitch = extractPitch(camFwd, up);
-    tmp.copy(camFwd).addScaledVector(up, -camFwd.dot(up));
-    if (tmp.lengthSq() > 1e-5) {
-      lookF.copy(tmp).normalize();
-      lookR.crossVectors(lookF, up).normalize();
-      lookF.crossVectors(up, lookR).normalize();
-    } else {
-      orthonormalFrame(up, lookF, lookR);
-    }
+  function writeFpsQuat(out: THREE.Quaternion) {
+    return quatFromFps(lookF, lookR, up, pitch, camFwd, tmp, lookFull, camMat, out);
   }
 
   function faceForUp(u: THREE.Vector3) {
@@ -294,7 +308,6 @@ export function mountGunWraith(
   }
 
   function applyLookDelta(dx: number, dy: number) {
-    if (reorientT < 1) return;
     if (performance.now() < lookMuteUntil) return;
     qNow.setFromAxisAngle(up, -dx * 0.0022);
     lookF.applyQuaternion(qNow);
@@ -304,30 +317,21 @@ export function mountGunWraith(
     pitch = Math.max(-1.45, Math.min(1.45, pitch));
   }
 
-  function snapAxis(v: THREE.Vector3, out: THREE.Vector3) {
-    const ax = Math.abs(v.x);
-    const ay = Math.abs(v.y);
-    const az = Math.abs(v.z);
-    if (ax >= ay && ax >= az) out.set(Math.sign(v.x) || 1, 0, 0);
-    else if (ay >= az) out.set(0, Math.sign(v.y) || 1, 0);
-    else out.set(0, 0, Math.sign(v.z) || 1);
-    return out;
-  }
-
-  function plantOnSlide(u: number) {
-    tmp.copy(slideToOut).multiplyScalar(HALF - (1 - u) * BEVEL);
-    tmp2.copy(slideFromOut).multiplyScalar(HALF - u * BEVEL);
-    tmp.add(tmp2).addScaledVector(slideEdge, slideCoord);
-    pos.copy(tmp).addScaledVector(up, EYE);
-  }
-
-  function applyReorientPose(s: number) {
-    qNow.slerpQuaternions(qId, qFull, s);
-    up.copy(fromUp).applyQuaternion(qNow).normalize();
-    if (s >= 1) up.copy(targetUp).normalize();
-    lookF.copy(fromLookF).applyQuaternion(qNow);
-    lookR.copy(fromLookR).applyQuaternion(qNow);
-    orthonormalFrame(up, lookF, lookR);
+  function alignUp(next: THREE.Vector3) {
+    if (next.lengthSq() < 1e-10) return;
+    next.normalize();
+    const d = up.dot(next);
+    if (d > 0.999999) {
+      up.copy(next);
+      orthonormalFrame(up, lookF, lookR);
+      return;
+    }
+    fpsForward(lookF, up, pitch, lookFull);
+    rotationBetween(up, next, qNow);
+    camRight.copy(lookR).applyQuaternion(qNow);
+    up.copy(next);
+    pitch = adoptWorldLook(lookFull, up, lookF, lookR, camRight);
+    pitch = Math.max(-1.52, Math.min(1.52, pitch));
   }
 
   function gatherWish() {
@@ -343,49 +347,6 @@ export function mountGunWraith(
     }
   }
 
-  function tryReorient(wishDir: THREE.Vector3) {
-    if (reorientT < 1) return;
-    if (slideLock > 0) return;
-    tmp.copy(pos).addScaledVector(up, -EYE);
-    snapAxis(up, fromUp);
-    slideFromOut.copy(fromUp).negate();
-    let bestOut: THREE.Vector3 | null = null;
-    let bestReach = HALF - BEVEL + 0.12;
-    for (const e of OUTS) {
-      if (Math.abs(e.dot(fromUp)) > 0.5) continue;
-      const reach = tmp.dot(e);
-      if (reach > bestReach) {
-        bestReach = reach;
-        bestOut = e;
-      }
-    }
-    if (!bestOut) return;
-    const toward = wishDir.lengthSq() > 0 ? wishDir : lookF;
-    if (bestOut.dot(toward) < -0.15) return;
-    slideToOut.copy(bestOut);
-    targetUp.copy(bestOut).negate();
-    slideEdge.crossVectors(slideFromOut, slideToOut).normalize();
-    slideCoord = THREE.MathUtils.clamp(
-      tmp.dot(slideEdge),
-      -(HALF - BEVEL - RADIUS),
-      HALF - BEVEL - RADIUS,
-    );
-    fromLookF.copy(lookF);
-    fromLookR.copy(lookR);
-    lookDirTo(fromLookFull);
-    hitInterior(pos, fromLookFull, aimPoint);
-    holdAim = true;
-    rotationBetween(fromUp, targetUp, qFull);
-    slideU = THREE.MathUtils.clamp((tmp.dot(slideToOut) - (HALF - BEVEL)) / BEVEL, 0, 0.4);
-    slideLatVel = toward.dot(slideEdge) * WALK;
-    reorientT = slideU;
-    upSpeed = 0;
-    planarSpeed = WALK;
-    maxQuatStep = 0;
-    havePrevCam = false;
-    reorientLog.length = 0;
-  }
-
   function isDown(code: string) {
     return held.has(code) || injected.has(code);
   }
@@ -394,11 +355,11 @@ export function mountGunWraith(
     const face = faceForUp(up).name;
     const hold: HudState["hold"] = !playing
       ? "IDLE"
-      : reorientT < 1
-        ? "REORIENT"
-        : grounded
+      : !grounded
+        ? "AIR"
+        : zone === "face"
           ? "PLANTED"
-          : "AIR";
+          : "ROLLING";
     const key = `${face}|${hold}|${playing}|${captured}`;
     if (key === lastHud) return;
     lastHud = key;
@@ -483,96 +444,53 @@ export function mountGunWraith(
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
 
-    if (reorientT < 1) {
-      slideU += (WALK * dt) / RAMP_LEN;
-      const s = Math.min(1, slideU);
-      applyReorientPose(s);
-      pos.addScaledVector(up, EYE - (pos.dot(up) + HALF));
-      gatherWish();
-      if (wish.lengthSq() < 1e-8) wish.copy(lookF);
+    gatherWish();
+    if (wish.lengthSq() > 0) {
       wish.normalize();
-      pos.addScaledVector(wish, WALK * dt);
       planarSpeed = WALK;
-      grounded = true;
-      upSpeed = 0;
-      reorientT = s;
-      holdAim = true;
-      if (s >= 1) {
-        slideLock = 0.22;
-        adoptAimAsFps();
-      }
+      pos.addScaledVector(wish, WALK * dt);
     } else {
-      holdAim = false;
-      if (slideLock > 0) slideLock = Math.max(0, slideLock - dt);
-      gatherWish();
-      if (wish.lengthSq() > 0) {
-        wish.normalize();
-        planarSpeed = WALK;
-        pos.addScaledVector(wish, WALK * dt);
-      } else {
-        planarSpeed = 0;
-      }
+      planarSpeed = 0;
+    }
 
-      if (playing || injected.size) {
-        if (grounded && (isDown("Space") || jumpHeld)) {
-          upSpeed = JUMP;
-          grounded = false;
-        }
+    if (playing || injected.size) {
+      if (grounded && (isDown("Space") || jumpHeld)) {
+        upSpeed = JUMP;
+        grounded = false;
+      }
+      if (!grounded) {
         upSpeed -= GRAV_ACCEL * dt;
         pos.addScaledVector(up, upSpeed * dt);
       }
+    }
 
-      const inner = HALF - RADIUS;
-      pos.x = THREE.MathUtils.clamp(pos.x, -inner, inner);
-      pos.y = THREE.MathUtils.clamp(pos.y, -inner, inner);
-      pos.z = THREE.MathUtils.clamp(pos.z, -inner, inner);
+    tmp.copy(pos).addScaledVector(up, -EYE);
+    zone = sampleSurface(tmp, surfP, surfN);
+    const sep =
+      (tmp.x - surfP.x) * surfN.x + (tmp.y - surfP.y) * surfN.y + (tmp.z - surfP.z) * surfN.z;
 
-      const heightAboveFloor = pos.dot(up) + HALF;
-      if (heightAboveFloor <= EYE + 0.02 && upSpeed <= 0) {
-        pos.addScaledVector(up, EYE - heightAboveFloor);
-        upSpeed = 0;
-        grounded = true;
-      } else {
-        grounded = heightAboveFloor <= EYE + 0.1 && upSpeed <= 0.25;
-      }
-
-      if (playing || injected.size) tryReorient(wish);
+    if (grounded || (sep <= 0.04 && upSpeed <= 0.2)) {
+      grounded = true;
+      upSpeed = 0;
+      alignUp(surfN);
+      pos.copy(surfP).addScaledVector(up, EYE);
+    } else if (sep < 0) {
+      alignUp(surfN);
+      pos.copy(surfP).addScaledVector(up, EYE);
+      upSpeed = 0;
+      grounded = true;
     }
 
     camera.position.copy(pos);
     frameSpeed = prevPos.distanceTo(pos) / Math.max(dt, 1e-4);
     prevPos.copy(pos);
-    if (holdAim) {
-      camFwd.subVectors(aimPoint, pos);
-      if (camFwd.lengthSq() < 1e-8) lookDirTo(camFwd);
-      else camFwd.normalize();
-    } else {
-      lookDirTo(camFwd);
-    }
-    tmp.copy(camFwd).negate();
-    camRight.crossVectors(up, tmp);
-    if (camRight.lengthSq() < 1e-8) {
-      camRight.copy(lookR).addScaledVector(camFwd, -lookR.dot(camFwd));
-      if (camRight.lengthSq() < 1e-8) {
-        camRight.set(1, 0, 0);
-        if (Math.abs(camFwd.x) > 0.9) camRight.set(0, 0, 1);
-        camRight.addScaledVector(camFwd, -camRight.dot(camFwd));
-      }
-    }
-    camRight.normalize();
-    lookFull.crossVectors(tmp, camRight).normalize();
-    camMat.makeBasis(camRight, lookFull, tmp);
-    camera.quaternion.setFromRotationMatrix(camMat);
+    writeFpsQuat(qCam);
+    camera.quaternion.copy(qCam);
     camera.up.copy(up);
     if (havePrevCam) {
       const d = Math.abs(prevCamQ.dot(camera.quaternion));
       const ang = 2 * Math.acos(Math.min(1, d));
-      if (reorientT < 1) {
-        if (ang > maxQuatStep) maxQuatStep = ang;
-        if (reorientLog.length < 80) {
-          reorientLog.push({ s: reorientT, ang: (ang * 180) / Math.PI, pitch, udot: lookF.dot(up) });
-        }
-      }
+      if (ang > maxQuatStep) maxQuatStep = ang;
     }
     prevCamQ.copy(camera.quaternion);
     havePrevCam = true;
@@ -603,16 +521,15 @@ export function mountGunWraith(
       look: { x: lookF.x, y: lookF.y, z: lookF.z },
       pitch,
       lookDotUp: lookF.dot(up),
-      reorient: reorientT,
+      reorient: zone === "face" ? 0 : zone === "edge" ? 0.5 : 1,
+      zone,
       aim: { x: camFwd.x, y: camFwd.y, z: camFwd.z },
-      aimPoint: { x: aimPoint.x, y: aimPoint.y, z: aimPoint.z },
       qx: camera.quaternion.x,
       qy: camera.quaternion.y,
       qz: camera.quaternion.z,
       qw: camera.quaternion.w,
       maxQuatStepDeg: (maxQuatStep * 180) / Math.PI,
       frameSpeed,
-      log: reorientLog,
     }),
     setKeys: (codes) => {
       injected.clear();
@@ -650,6 +567,9 @@ export function mountGunWraith(
         lookR.crossVectors(lookF, up).normalize();
         lookF.crossVectors(up, lookR).normalize();
       }
+    },
+    setPos: (x, y, z) => {
+      pos.set(x, y, z);
     },
   };
   window.__controlsTest = probe;

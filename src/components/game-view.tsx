@@ -88,7 +88,7 @@ export function GameView() {
         <div className="absolute left-5 top-5 z-10 sm:left-6 sm:top-6">
           <p className="font-display text-[11px] font-semibold tracking-[0.32em] text-accent">
             GUN <span className="text-hazard">WRAITH</span>
-            <span className="ml-3 tracking-[0.22em] text-muted">GRAVITY 01</span>
+            <span className="ml-3 tracking-[0.22em] text-muted">VERTIGO</span>
           </p>
         </div>
         <div className="absolute right-5 top-5 text-right text-[11px] tracking-[0.14em] text-muted sm:right-6 sm:top-6">
@@ -98,7 +98,7 @@ export function GameView() {
         </div>
         <div className="absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 border border-accent/80" />
         <p className="absolute bottom-6 left-5 max-w-sm text-[11px] leading-relaxed tracking-wide text-muted sm:bottom-7 sm:left-6">
-          Walk onto a 45° bevel. It slides you onto the next face.
+          Walk the cove — gravity follows the ground. You keep the gun the whole way.
           {hud.playing && !hud.captured ? " Click to recapture the mouse." : ""}
         </p>
       </div>
